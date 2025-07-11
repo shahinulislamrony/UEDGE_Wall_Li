@@ -6,11 +6,11 @@ from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 
 
-DATA_PATH = r'C:\UEDGE_run_Shahinul\NSTX_U\PePi8MW_Dn0.35Chi0.5_fneut0.35_check_saveall'
+DATA_PATH = r'C:\UEDGE_run_Shahinul\NSTX_PoP\PePi2.0MW'
 
 
 DATA_PATHS = [
-    r'C:\UEDGE_run_Shahinul\NSTX_U\PePi8MW_Dn0.35Chi0.5_fneut0.35_check_saveall'
+    r'C:\UEDGE_run_Shahinul\NSTX_PoP\PePi2.0MW'
 ]
 
 marker = 'o' 
@@ -30,9 +30,10 @@ for path in DATA_PATHS:
         'Li_all': read_csv(os.path.join(path, 'Li_all.csv')) 
     }
 
-it = np.linspace(1, 500, 500)
-dt = 10e-3
+it = np.linspace(1, 1000, 1000)
+dt = 5e-3
 ix = 5
+ixmp = 36 
 
 for path in DATA_PATHS:
     if Li_data[path]['phi_Li'] is None or Li_data[path]['Li_all'] is None:
@@ -57,12 +58,11 @@ for path in DATA_PATHS:
     Li_pump_wall = Li_all[:, 9]
     Li_pump_idiv = Li_all[:, 10]
     Li_ionization = Li_all[:, 11]
-
-    if Li_source_odiv[:-1].shape != phi_Li.shape:
-        print("Shape mismatch between Li_source_odiv and phi_Li.")
-        continue
-
     Li_source_odiv = Li_source_odiv[:-1] + phi_Li
+
+    #if Li_source_odiv[:-1].shape != phi_Li.shape:
+    #    print("Shape mismatch between Li_source_odiv and phi_Li.")
+     #   continue
 
 def get_color(value, cmap, norm):
     """Map a value to a color based on colormap and normalization."""
@@ -168,7 +168,7 @@ def process_and_plot(directory, is_2D, is_sxnp, is_evap, sxnp, evap, file_prefix
             if is_sxnp:
                 numbers = data.flatten()[:-1] / sxnp
             elif is_2D:
-                numbers = data[105, :-1]
+                numbers = data[52, :-1]
             elif is_evap:
                 numbers = data.flatten()[:-1] * evap
             else:
@@ -202,44 +202,66 @@ def process_and_plot(directory, is_2D, is_sxnp, is_evap, sxnp, evap, file_prefix
     plt.ylabel(ylabel, fontsize=20)
     plt.tick_params(axis='both', labelsize=16)
     plt.grid(True)
+    #plt.yscale('log')
     plt.ylim([0, np.max(numbers)*1.1])  
-    plt.xlim([-0.1, 0.25])
+    plt.xlim([-0.06, 0.20])
     plt.tight_layout()
     plt.savefig(output_file, dpi=300)
     plt.show()
 
 
-# Main script
+
 if __name__ == "__main__":
-    nx = 500
-    y = np.array([-0.09580207, -0.0883297, -0.07360328, -0.05940535, -0.04597069, 
-               -0.03356609, -0.02240577, -0.01260851, -0.00402888,  0.00984205, 
-                0.03007019,  0.04991498,  0.06846575,  0.08608859,  0.10297708, 
-                0.1194364,   0.13546967,  0.15123152,  0.1666732,   0.18186758, 
-                0.19708181,  0.21228164,  0.22750439,  0.2429528,   0.25864637])
-    sxnp = np.array([4.03551331e-08, 4.10567926e-02, 4.11997059e-02, 4.06769506e-02,
-       3.91185743e-02, 3.65631064e-02, 3.31731544e-02, 2.93343129e-02,
-       2.64046084e-02, 6.62187340e-02, 7.25192941e-02, 6.84025675e-02,
-       6.78708695e-02, 6.55699145e-02, 6.60136191e-02, 6.56662642e-02,
-       6.58871054e-02, 6.65948323e-02, 6.62120841e-02, 6.74108774e-02,
-       6.93008565e-02, 7.01755463e-02, 7.24351892e-02, 7.52719375e-02,
-       7.78466636e-02])
+    nx = 1000
+    y = np.array([-0.05544489, -0.0507309 , -0.04174753, -0.03358036, -0.02614719,
+       -0.01935555, -0.01316453, -0.00755603, -0.00245243,  0.00497426,
+        0.012563  ,  0.01795314,  0.02403169,  0.03088529,  0.03865124,
+        0.04744072,  0.05723254,  0.06818729,  0.0804908 ,  0.09413599,
+        0.10907809,  0.12501805,  0.14181528,  0.15955389,  0.17792796])
+    
+    sxnp = np.array([1.65294727e-08, 1.68072047e-02, 1.57913285e-02, 1.47307496e-02,
+       1.37802350e-02, 1.28710288e-02, 1.19247238e-02, 1.09516290e-02,
+       1.02117906e-02, 2.14465429e-02, 1.11099457e-02, 1.26587791e-02,
+       1.45917191e-02, 1.66915905e-02, 1.94826593e-02, 2.23582531e-02,
+       2.53806793e-02, 2.94667140e-02, 3.39163144e-02, 3.85707117e-02,
+       4.34572856e-02, 4.70735328e-02, 5.17684150e-02, 5.64336990e-02,
+       5.97825750e-02])
+    
     evap = 2.44e-19
     is_evap = True
 
     max_value_tsurf, max_q, max_q_Li_list, C_Li_omp = process_dataset(DATA_PATH, nx)
 
     cmap = plt.get_cmap('turbo')
-   # norm = Normalize(vmin=np.min(max_value_tsurf), vmax=np.max(max_value_tsurf))
+    #norm = Normalize(vmin=np.min(max_value_tsurf), vmax=np.max(max_value_tsurf))
     norm = Normalize(vmin=0*np.min(Li_source_odiv), vmax=np.max(Li_source_odiv))
 
     var = 'Gamma_net'
     name = 'Gamma_Li_surface'
     unit = '$\Gamma_{Li}^{net}$ (/m$^{-2}$s)'
     
-    # var = 'Gamma_Li'
-    # name = 'Total_Li_flux'
-    # unit = '$\Gamma_{Li}^{emit}$ (/m$^{-2}$s)'
+    
+    
+    var = 'q_perp'
+    name = 'q_perpit'
+    unit = '$q{\perp}^{odiv}$ (/W$m^{-2}$)'
+    is_2D=False,
+    
+    # var = 'n_e'
+    # name = 'n_e_0.0.csv.npy'
+    # unit = '$n_{e}^{odiv}$ (/m$^{-3}$)'
+    # is_2D=True,
+    
+    # var = 'T_e'
+    # name = 'T_e'
+    # unit = '$T_{e}^{odiv}$ (eV)'
+    # is_2D=True,
+    
+    
+
+   # var = 'Gamma_Li'
+   # name = 'Total_Li_flux'
+   # unit = '$\Gamma_{Li}^{emit}$ (/m$^{-2}$s)'
 
     process_and_plot(
         directory=os.path.join(DATA_PATH, var),
