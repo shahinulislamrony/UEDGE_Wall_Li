@@ -1,9 +1,11 @@
 import sys
 import math
-import os 
+import os
 import numpy as np
-from uedge.rundt import *
 import matplotlib.pyplot as plt
+import pandas as pd
+import UEDGE_utils.analysis as ana
+import UEDGE_utils.plot as utplt
 from uedge import *
 from uedge.hdf5 import *
 from uedge.rundt import *
@@ -12,429 +14,416 @@ import uedge_mvu.utils as mu
 import uedge_mvu.analysis as mana
 import uedge_mvu.tstep as ut
 import UEDGE_utils.analysis as ana
-import pandas as pd
 from runcase import *
-from uedge.rundt import UeRun
+import traceback
+import heat_code
 
 
+import os
+import sys
+import numpy as np
+import pandas as pd
 
+# ---- UEDGE Setup ----
 setGrid()
-setPhysics(impFrac=0,fluxLimit=True)
-setDChi(kye=1.0, kyi=1.0, difni=0.5,nonuniform = True)
+setPhysics(impFrac=0, fluxLimit=True)
+setDChi(kye=1.0, kyi=1.0, difni=0.5, nonuniform=True)
 setBoundaryConditions(ncore=6.2e19, pcoree=2.0e6, pcorei=2.0e6, recycp=0.98)
 setimpmodel(impmodel=True)
 
-
-bbb.cion=3
-bbb.oldseec=0
-bbb.restart=1
+bbb.cion = 3
+bbb.oldseec = 0
+bbb.restart = 1
 bbb.nusp_imp = 3
-bbb.icntnunk=0
-
-hdf5_restore("./final.hdf5")
+bbb.icntnunk = 0
 
 
 
+try:
+    current_dir = os.getcwd()
+    hdf5_dir = os.path.join(current_dir, "run_last_iterations")
+    csv_dir = os.path.join(current_dir, "fngxrb_use")
 
-bbb.ftol=1e-5;bbb.dtreal=1e-10
-bbb.issfon=1; bbb.isbcwdt=1
+    if not os.path.isdir(hdf5_dir):
+        raise FileNotFoundError(f"Directory {hdf5_dir} not found.")
+
+    # Find all run_last_{i}.hdf5 files and sort by i
+    file_list = sorted([
+        f for f in os.listdir(hdf5_dir)
+        if f.startswith("run_last_") and f.endswith(".hdf5")
+    ], key=lambda x: int(x.split("_")[-1].split(".")[0]))
+
+    nx = len(file_list)
+    print("Number of iterations found:", nx)
+
+    if nx > 0:
+        last_file = file_list[-1]  # e.g., run_last_15.hdf5
+        iter_num = last_file.split("_")[-1].split(".")[0]
+        hdf5_file_path = os.path.join(hdf5_dir, last_file)
+
+        print(f"Loading HDF5 from: {hdf5_file_path}")
+        hdf5_restore(hdf5_file_path)
+
+        # Try loading corresponding CSV
+        csv_file_name = f"fngxrb_use_{iter_num}.csv"
+        csv_file_path = os.path.join(csv_dir, csv_file_name)
+
+        if os.path.isfile(csv_file_path):
+            print(f"Loading CSV from: {csv_file_path}")
+            bbb.fngxrb_use[:, 1, 0] = np.loadtxt(csv_file_path, delimiter=',')
+        else:
+            print(f"CSV file {csv_file_path} not found. Skipping CSV data assignment.")
+    else:
+        print("No HDF5 iteration files found. Restoring from final.hdf5")
+        hdf5_restore("./final.hdf5")
+
+except Exception as e:
+    print(f"Error encountered: {e}")
+    print("Restoring from final.hdf5")
+    hdf5_restore("./final.hdf5")
+
+
+bbb.ftol = 1e-5
+bbb.dtreal = 1e-10
+bbb.issfon = 1
+bbb.isbcwdt = 1
 bbb.exmain()
 
-print("Completed reading a converged solution for Li atoms and Li ions solution")
+
+
+def eval_Li_evap_at_T_Cel(temperature):
+    a1 = 5.055  
+    b1 = -8023.0
+    xm1 = 6.939 
+    tempK = temperature + 273.15
+
+    if np.any(tempK <= 0):
+        raise ValueError("Temperature must be above absolute zero (-273.15°C).")
+
+    vpres1 = 760 * 10**(a1 + b1 / tempK)  
+
+    sqrt_argument = xm1 * tempK
+    if np.any(sqrt_argument <= 0):
+        raise ValueError(f"Invalid value for sqrt: xm1 * tempK has non-positive values.")
+
+    fluxEvap = 1e4 * 3.513e22 * vpres1 / np.sqrt(sqrt_argument)  # Evaporation flux
+    return fluxEvap
+
+
+def flux_Li_Phys_Sput(bbb, com, Yield=1e-3, UEDGE=False):
+    if not UEDGE:
+        kB = 1.3806e-23
+        eV = 1.6022e-19
+        fd = bbb.fnix[com.nx, :, 0] * np.cos(com.angfx[com.nx, :]) / com.sxnp[com.nx, :]
+        ft = 0
+        fli = 0 * (ft + fd) * 0.65
+        ylid = Yield
+        ylit = 0.001
+        ylili = 0.3
+        fneut = 0.35
+        fneutAd = 1
+        fluxPhysSput = fneut * (fd * ylid + ft * ylit + fli * ylili)
+        return fluxPhysSput
+    else:
+        print('UEDGE model for Li physical sputtering')
+        fluxPhysSput = bbb.sputflxrb[:, 1, 0] / com.sxnp[com.nx, :]
+        return fluxPhysSput
+
+
+def flux_Li_Ad_atom(final_temperature, bbb, com, Yield=1e-3, YpsYad=1, eneff=0.9, A=1e-7):
+    yadoyps = YpsYad  # ratio of ad-atom to physical sputtering yield
+    eneff = eneff  # effective energy (eV), 0.9
+    aad = A  # constant
+    ylid = Yield
+    ylit = 0.001
+    ft = 0
+    kB = 1.3806e-23
+    eV = 1.6022e-19
+    tempK = final_temperature + 273.15
+    fd = bbb.fnix[com.nx, :, 0] * np.cos(com.angfx[com.nx, :]) / com.sxnp[com.nx, :]
+    fneutAd = 1
+    fluxAd = fd * yadoyps / (1 + aad * np.exp(eV * eneff / (kB * tempK)))
+
+    return fluxAd
 
 
 
-molar_mass_lithium = 6.94  # g/mol for lithium
-avogadro_number = 6.022e23  # atoms/mol
+def ensure_dir(directory):
+    os.makedirs(directory, exist_ok=True)
 
-def lithium_atoms_per_second(mass_in_grams):
-    moles_of_lithium = mass_in_grams / molar_mass_lithium
-    total_atoms = moles_of_lithium * avogadro_number
-    return total_atoms
+def save_csv(arr, directory, basename, i, delimiter=","):
+    ensure_dir(directory)
+    fname = os.path.join(directory, f"{basename}_{int(i)}.csv")
+    np.savetxt(fname, arr, delimiter=delimiter)
+    print(f"Saved {basename} in file: {fname}")
 
-phi_Li_source_odiv = []
-phi_Li_source_idiv = []
-phi_Li_source_wall = []
-phi_Li_source_pfr = []
-Li_rad = []
-phi_Li_odiv = []
-phi_Li_wall =[]
-phi_Li_idiv = []
+def save_npy(arr, filename):
+    np.save(filename, arr)
+    print(f"Saved {filename}")
 
-pump_Li_odiv = []
-pump_Li_wall = []
-pump_Li_idiv = []
-Li_ionization = []
+def save_hdf5(savefile, directory="final_iterations"):
+    ensure_dir(directory)
+    full_path = os.path.join(directory, savefile)
+    hdf5_save(full_path)
+    print(f"Saved HDF5 file: {full_path}")
+
+def save_png(plot_func, directory, basename, i, save=False):
+    ensure_dir(directory)
+    fname = os.path.join(directory, f"{basename}_{int(i)}.png")
+    plot_func()  # This should create the plot, but not save it
+    if save:
+        plt.savefig(fname, dpi=300)
+        print(f"Saved plot: {fname}")
+    plt.close()
+
+def save_surface_heatflux_components(ana, i, target):
+    data = ana.get_surface_heatflux_components(target=target)
+    keys = list(data.keys())
+    arrs = [np.array(data[k_]).reshape(-1) for k_ in keys]
+    # Ensure all arrays are the same length
+    min_len = min(len(a) for a in arrs)
+    arrs = [a[:min_len] for a in arrs]
+    stacked = np.column_stack(arrs)
+    outdir = "surface_heatflux_components"
+    ensure_dir(outdir)
+    fname = os.path.join(outdir, f"surface_heatflux_components_{target}_{int(i)}.csv")
+    header = ",".join(keys)
+    np.savetxt(fname, stacked, delimiter=",", header=header, comments='')
+    print(f"Saved {fname}")
+
+# --- Main Variables ---
+
+Tsurf_max = []
+phi_Li = []
+qmax = []
+it = []
+
 Te_max_odiv = []
 ne_max_odiv = []
 zeff_OMP_sep = []
 C_Li_omp_sep = []
 ni_omp_sep = []
-Te_omp_sep = []
 ne_omp_sep = []
+Te_omp_sep = []
 C_Li_all_sep_avg = []
+phi_Li_source_odiv = []
+phi_Li_source_idiv = []
+phi_Li_source_pfr = []
+phi_Li_source_wall = []
+Li_rad = []
+phi_Li_odiv = []
+phi_Li_wall = []
+phi_Li_idiv = []
+pump_Li_odiv = []
+pump_Li_wall = []
+pump_Li_idiv = []
+Li_ionization = []
 
+# --- Main Loop Setup ---
 
-Tsurf_max = []
-phi_Li =[]
-qmax = []
-Error = 1
-t_run = 5 
-dt_each = 5e-3
-n = int (t_run / dt_each)
+t_run = 5
+dt_each = 40e-3
+n = int(t_run / dt_each)
 i = 0
-it = []
-previous_q_data = None  
-Total_int_flux = 0.0
+print("current is is:", i)
+
+try:
+    current_dir = os.getcwd()
+    hdf5_dir = os.path.join(current_dir, "run_last_iterations")
+
+    file_list = sorted([
+        f for f in os.listdir(hdf5_dir)
+        if f.startswith("run_last_") and f.endswith(".hdf5")
+    ], key=lambda x: int(x.split("_")[-1].split(".")[0]))
+
+    if not file_list:
+        i = 0
+        print("No HDF5 files found, i set to 0")
+    else:
+        nx = len(file_list)
+        i = nx
+        print(f"Number of iterations found: {nx} and i updated as {i}")
+
+except Exception as e:
+    i = 0
+    print(f"Error encountered: {e}")
+    print("Setting i = 0 due to missing folder or read error")
 
 while i <= n:
     bbb.pradpltwl()
     bbb.plateflux()
-    q_rad = bbb.pwr_pltz[:,1]+bbb.pwr_plth[:,1]
-    q_data = bbb.sdrrb + bbb.sdtrb
-    q_data = q_data.reshape(-1)
+    q_rad = bbb.pwr_pltz[:, 1] + bbb.pwr_plth[:, 1]
+    q_data = (bbb.sdrrb + bbb.sdtrb).reshape(-1)
     print('size of the data is :', len(q_data))
     print(type(bbb.sdrrb), type(bbb.sdtrb))
     print(bbb.sdrrb.shape, bbb.sdtrb.shape)
     q_data = np.round(q_data, 2)
-    np.save('q_data.npy', q_data)
+    save_npy(q_data, 'q_data.npy')
 
     q_max2 = np.max(q_data)
     print('q_perp is done')
     print('Max q is :', q_max2)
 
-    # Call the heat code
     print('---Calling heat code----')
     try:
-        exec(open("heat_code.py").read())  
+        T, no_it, temp_surf, Gamma, qsurf, qion = heat_code.run_heat_simulation(bbb=bbb, com=com, dt=dt_each)
+        Tsurf = T 
     except Exception as e:
         print(f"Error executing heat_code.py: {e}")
-        break
-    
-    Tsurf = final_temperature
+        traceback.print_exc()
+
     T_max = np.max(Tsurf)
     print('Temp length is :', len(Tsurf))
     print('Peak temp is :', T_max)
     Tsurf_max.append(T_max)
+    final_temperature = Tsurf[:, 1]  
+    fluxEvap = eval_Li_evap_at_T_Cel(final_temperature)
+    fluxPhysSput = flux_Li_Phys_Sput(bbb=bbb, com=com, UEDGE=True)
+    fluxAd = flux_Li_Ad_atom(final_temperature, bbb=bbb, com=com, Yield=1e-3, YpsYad=1e-3, eneff=0.9, A=1e-7)
+    tot = fluxEvap + fluxAd
 
-    output_dir = "Tsurf_Li"
-    os.makedirs(output_dir, exist_ok=True) 
-    fname = os.path.join(output_dir, "T_surfit_" + "{:.1f}".format(i) + ".csv")
-    print("Saving Tsurf in file: ", fname)
-    np.savetxt(fname, Tsurf, delimiter=",")
+    save_csv(Tsurf, "Tsurf_Li", "T_surfit", i)
+    save_csv(qsurf, "q_Li_surface", "q_Li_surface", i)
+    save_csv(qion, "q_ion", "q_ion", i)
+    save_csv(Gamma, "Gamma_net", "Gamma_Li_surface", i)
+    save_csv(fluxEvap, "Gamma_Li", "Evap_flux", i)
+    save_csv(fluxPhysSput, "Gamma_Li", "PhysSput_flux", i)
+    save_csv(fluxAd, "Gamma_Li", "Adstom_flux", i)
+    save_csv(tot, "Gamma_Li", "Total_Li_flux", i)
 
-    q_Li= q_Li_surf
-    output_dir = "q_Li_surface"
-    os.makedirs(output_dir, exist_ok=True) 
-    fname = os.path.join(output_dir, "q_Li_surface_" + "{:.1f}".format(i) + ".csv")
-    print("Saving Tsurf in file: ", fname)
-    np.savetxt(fname, q_Li, delimiter=",")
-
-    Gamma_net= Gamma_net
-    output_dir = "Gamma_net"
-    os.makedirs(output_dir, exist_ok=True) 
-    fname = os.path.join(output_dir, "Gamma_Li_surface_" + "{:.1f}".format(i) + ".csv")
-    print("Saving Tsurf in file: ", fname)
-    np.savetxt(fname, Gamma_net, delimiter=",")
-
-    
-    output_dir = "Gamma_Li"
-    os.makedirs(output_dir, exist_ok=True) 
-    fname = os.path.join(output_dir, "Evap_flux_" + "{:.1f}".format(i) + ".csv")
-    print("Saving Evap in file: ", fname)
-    np.savetxt(fname, fluxEvap, delimiter=",")
-
-    fname = os.path.join(output_dir, "PhysSput_flux_" + "{:.1f}".format(i) + ".csv")
-    print("Saving Phys_Sput in file: ", fname)
-    np.savetxt(fname, fluxPhysSput, delimiter=",")
-
-    fname = os.path.join(output_dir, "Adstom_flux_" + "{:.1f}".format(i) + ".csv")
-    print("Saving Ad-atom in file: ", fname)
-    np.savetxt(fname, fluxAd, delimiter=",")
-
-    fname = os.path.join(output_dir, "Total_Li_flux_" + "{:.1f}".format(i) + ".csv")
-    print("Saving Li_flux in file: ", fname)
-    np.savetxt(fname, tot, delimiter=",")
-
-    
     print('----Heat code completed and output obtained')
     print('Length of the surface temperature is:', len(Tsurf))
     print('---Heat code is done----')
-  
 
     print("Total Li flux is :", len(tot))
-    print("phi_Li^Odiv :", np.sum(tot*com.sxnp[com.nx,:]))
+    print("phi_Li^Odiv :", np.sum(tot * com.sxnp[com.nx, :]))
     print('-----Li upper limit sets to 1e22---')
-    Li_int_flux = np.sum(tot*com.sxnp[com.nx,:])
+    Li_int_flux = np.sum(tot * com.sxnp[com.nx, :])
     phi_Li.append(Li_int_flux)
 
-    Total_int_flux += Li_int_flux
-
-    Li_upper = lithium_atoms_per_second(0.4)
-    #if Total_int_flux > Li_upper:
-    #    print(f'Li fluxes {Total_int_flux:.2f} reaches to upper limit {Li_upper:.2f}')
-    #    break
-    
-    
-    #bbb.fngxrb_use[:,1,0] = - tot*com.sxnp[com.nx,:]
-    #print("Sum of fngxrb_use",np.sum(bbb.fngxrb_use[:,1,0]))
-    #if Factor == 0:
-    #    bbb.fphysyrb = "0.35"
-    #else:
-    #    bbb.fphysyrb = f"{0.35 + (Factor - 1):.4f}"
-        
-    #print('The factor is :', bbb.fphysyrb[0,0])
-
-    bbb.fngxrb_use[:,1,0] = tot*com.sxnp[com.nx,:]
+    bbb.fngxrb_use[:, 1, 0] = tot * com.sxnp[com.nx, :]
     print('sum of evaporation and add atom is :', np.sum(bbb.fngxrb_use))
 
-    Phy_sput_Li = np.sum(bbb.sputflxrb[:,1,0])
+    save_csv(bbb.fngxrb_use[:, 1, 0], "fngxrb_use", "fngxrb_use", i)
+
+    savefile = f"final_iteration_{int(i)}.hdf5"
+    save_hdf5(savefile)
+
+    Phy_sput_Li = np.sum(bbb.sputflxrb[:, 1, 0])
     print('Li sput phys is :', Phy_sput_Li)
-    
+
     print("Completed heat code, now running UEDGE code with the updated Li flux")
-    
     bbb.restart = 1
     bbb.itermx = 10
     bbb.dtreal = 1e-10
     bbb.ftol = 1e-5
     bbb.issfon = 1
-    bbb.isbcwdt=1
+    bbb.isbcwdt = 1
     bbb.exmain()
-    
-    
-    print("******Check done*****")
 
-    print("***** ut-step for 1 ms")
+    ut.uestep(dt_each, reset=True)
 
-    #print(f"Tmax is {T_max}, so use the uestep")
-    ut.uestep(5e-3, reset=True)
-    savefile="run_last"+".hdf5"
-    hdf5_save(savefile)
-    print("Saving lasted out in file: ", savefile)
-
-    """
-
-    if T_max <= 380:
-        print(f"Tmax is {T_max}, so use the uestep")
-        ut.uestep(10e-3, reset=True)
-        savefile="run_last"+".hdf5"
-        hdf5_save(savefile)
-        print("Saving lasted out in file: ", savefile)
-        
-    else:
-        print(f"Tmax is {T_max}, so use rundt")
-        bbb.t_stop = 10e-3
-        bbb.dt_tot = 10e-3
-        rundt(dtreal=10e-3, t_stop = 10e-3)
-    """
-    
 
     print("******done, now save data*****")
-    
 
+    # ---- Save additional data if bbb.iterm == 1 ----
     if bbb.iterm == 1:
-        np.save('final.npy', final_temperature) 
+        save_npy(final_temperature, 'final.npy')
         bbb.pradpltwl()
         bbb.plateflux()
-        q_rad = bbb.pwr_pltz[:,1]+bbb.pwr_plth[:,1]
-        q_data = bbb.sdrrb + bbb.sdtrb
-        q_data = q_data.reshape(-1)
+        q_rad = bbb.pwr_pltz[:, 1] + bbb.pwr_plth[:, 1]
+        q_data = (bbb.sdrrb + bbb.sdtrb).reshape(-1)
         q_max = np.max(q_data)
         qmax.append(q_max)
         print("Max q_perp is :", q_max)
-
-        output_dir = "q_perp"
-        os.makedirs(output_dir, exist_ok=True) 
-        fname = os.path.join(output_dir, "q_perpit_" + "{:.1f}".format(i) + ".csv")
-        print("Saving q_perp in file: ", fname)
-        np.savetxt(fname, q_data)
-
-        #fname = os.path.join(output_dir, "q_surface_" + "{:.1f}".format(i) + ".csv")
-        #print("Saving q_perp in file: ", fname)
-        #np.savetxt(fname, q_surface)
-        
-     
-        savefile="run_last"+".hdf5"
-        hdf5_save(savefile)
+        save_csv(q_data, "q_perp", "q_perpit", i)
+        savefile = f"run_last_{int(i)}.hdf5"
+        save_hdf5(savefile, directory="run_last_iterations")
         print("Saving lasted out in file: ", savefile)
 
-        
-        
-        Te_max = np.max(bbb.te[com.nx,:]/bbb.ev)
-        ne_max = np.max(bbb.ne[com.nx,:])
+        Te_max = np.max(bbb.te[com.nx, :] / bbb.ev)
+        ne_max = np.max(bbb.ne[com.nx, :])
         Te_max_odiv.append(Te_max)
         ne_max_odiv.append(ne_max)
         zeff_omp = bbb.zeff[bbb.ixmp, com.iysptrx+1]
         zeff_OMP_sep.append(zeff_omp)
-        n_Li = (bbb.ni[bbb.ixmp, com.iysptrx+1,2]+bbb.ni[bbb.ixmp, com.iysptrx+1,3]+bbb.ni[bbb.ixmp, com.iysptrx+1,4])
-        C_Li_OMP = n_Li/bbb.ne[bbb.ixmp, com.iysptrx+1]
+        n_Li = (bbb.ni[bbb.ixmp, com.iysptrx+1, 2] +
+                bbb.ni[bbb.ixmp, com.iysptrx+1, 3] +
+                bbb.ni[bbb.ixmp, com.iysptrx+1, 4])
+        C_Li_OMP = n_Li / bbb.ne[bbb.ixmp, com.iysptrx+1]
         C_Li_omp_sep.append(C_Li_OMP)
-        ni_omp = bbb.ni[bbb.ixmp,com.iysptrx+1,0]
+        ni_omp = bbb.ni[bbb.ixmp, com.iysptrx+1, 0]
         ni_omp_sep.append(ni_omp)
         ne_omp = bbb.ne[bbb.ixmp, com.iysptrx+1]
         ne_omp_sep.append(ne_omp)
-        Te_omp = bbb.te[bbb.ixmp,com.iysptrx+1]/bbb.ev
+        Te_omp = bbb.te[bbb.ixmp, com.iysptrx+1] / bbb.ev
         Te_omp_sep.append(Te_omp)
-
-
-        output_dir = "n_Li1"
-        os.makedirs(output_dir, exist_ok=True)  
-        fname = os.path.join(output_dir,"n_Li1_" + "{:.1f}".format(i) + ".csv")
-        print("Saving in_Li+ in file: ", fname)
-        np.savetxt(fname, bbb.ni[:,:,2])
-
-        output_dir = "n_atom"
-        os.makedirs(output_dir, exist_ok=True)  
-        fname = os.path.join(output_dir,"n_0_" + "{:.1f}".format(i) + ".csv")
-        print("Saving in_Li0 in file: ", fname)
-        np.savetxt(fname, bbb.ng[:,:,1])
-
-        output_dir = "Phi_D1_odiv"
-        os.makedirs(output_dir, exist_ok=True)  
-        fname = os.path.join(output_dir,"Phi_D1_" + "{:.1f}".format(i) + ".csv")
-        print("Saving in D+ in file: ", fname)
-        np.savetxt(fname, bbb.fnix[com.nx,:,0])
-
-
-        output_dir = "Phi_Li1_odiv"
-        os.makedirs(output_dir, exist_ok=True)  
-        fname = os.path.join(output_dir,"Phi_Li1_" + "{:.1f}".format(i) + ".csv")
-        print("Saving in_Li+ in file: ", fname)
-        np.savetxt(fname, bbb.fnix[com.nx,:,2])
-
-        output_dir = "Phi_Li2_odiv"
-        os.makedirs(output_dir, exist_ok=True)  
-        fname = os.path.join(output_dir,"Phi_Li2_" + "{:.1f}".format(i) + ".csv")
-        print("Saving in_Li2+ in file: ", fname)
-        np.savetxt(fname, bbb.fnix[com.nx,:,3])
-
-        output_dir = "Phi_Li3_odiv"
-        os.makedirs(output_dir, exist_ok=True)  
-        fname = os.path.join(output_dir,"Phi_Li3_" + "{:.1f}".format(i) + ".csv")
-        print("Saving in_Li3+ in file: ", fname)
-        np.savetxt(fname, bbb.fnix[com.nx,:,4])
-
-        output_dir = "Phi_Li3_wall"
-        os.makedirs(output_dir, exist_ok=True)  
-        fname = os.path.join(output_dir,"Phi_Li3_" + "{:.1f}".format(i) + ".csv")
-        print("Saving in_Li3+ in file: ", fname)
-        np.savetxt(fname, bbb.fniy[:,com.ny,4])
-
-        output_dir = "T_e"
-        os.makedirs(output_dir, exist_ok=True)  
-        fname = os.path.join(output_dir, "T_e_" + "{:.1f}".format(i) + ".csv")
-        print("Saving T_e in file: ", fname)
-        np.savetxt(fname, bbb.te/bbb.ev)
-        
-        output_dir = "n_Li2"
-        os.makedirs(output_dir, exist_ok=True)  
-        fname = os.path.join(output_dir, "n_Li2_" + "{:.1f}".format(i) + ".csv")
-        print("Saving n_Li2+ in file: ", fname)
-        np.savetxt(fname, bbb.ni[:,:,3])
-
-        output_dir = "n_Li3"
-        os.makedirs(output_dir, exist_ok=True)  
-        fname = os.path.join(output_dir, "n_Li3_" + "{:.1f}".format(i) + ".csv")
-        print("Saving n_Li3+ in file: ", fname)
-        np.savetxt(fname, bbb.ni[:,:,4])
-
-        output_dir = "n_e"
-        os.makedirs(output_dir, exist_ok=True)  
-        fname = os.path.join(output_dir, "n_e_" + "{:.1f}".format(i) + ".csv")
-        print("Saving n_e in file: ", fname)
-        np.save(fname, bbb.ne)
-
-        n_Li_all_sep = (bbb.ni[:, com.iysptrx,2]+bbb.ni[:, com.iysptrx,3]+bbb.ni[:, com.iysptrx,4])
-        ne_all_sep = bbb.ne[:,com.iysptrx]
-        C_Li_all_sep = (n_Li_all_sep/ne_all_sep)
-
-        output_dir = "C_Li"
-        os.makedirs(output_dir, exist_ok=True)  
-        fname = os.path.join(output_dir, "C_Li_sep_all_" + "{:.1f}".format(i) + ".csv")
-        print("Saving C_Li in file: ", fname)
-        np.savetxt(fname,  C_Li_all_sep)
-        
+        save_csv(bbb.ni[:, :, 2], "n_Li1", "n_Li1", i)
+        save_csv(bbb.ng[:, :, 1], "n_atom", "n_0", i)
+        save_csv(bbb.fnix[com.nx, :, 0], "Phi_D1_odiv", "Phi_D1", i)
+        save_csv(bbb.fnix[com.nx, :, 2], "Phi_Li1_odiv", "Phi_Li1", i)
+        save_csv(bbb.fnix[com.nx, :, 3], "Phi_Li2_odiv", "Phi_Li2", i)
+        save_csv(bbb.fnix[com.nx, :, 4], "Phi_Li3_odiv", "Phi_Li3", i)
+        save_csv(bbb.fniy[:, com.ny, 4], "Phi_Li3_wall", "Phi_Li3", i)
+        save_csv(bbb.te / bbb.ev, "T_e", "T_e", i)
+        save_csv(bbb.ni[:, :, 3], "n_Li2", "n_Li2", i)
+        save_csv(bbb.ni[:, :, 4], "n_Li3", "n_Li3", i)
+        ensure_dir("n_e")
+        np.save(os.path.join("n_e", f"n_e_{int(i)}"), bbb.ne)
+        n_Li_all_sep = (bbb.ni[:, com.iysptrx, 2] +
+                        bbb.ni[:, com.iysptrx, 3] +
+                        bbb.ni[:, com.iysptrx, 4])
+        ne_all_sep = bbb.ne[:, com.iysptrx]
+        C_Li_all_sep = n_Li_all_sep / ne_all_sep
+        save_csv(C_Li_all_sep, "C_Li", "C_Li_sep_all", i)
         C_Li_all_sep_avg.append(np.average(C_Li_all_sep))
-        
-        
-        n_Li_rad = (bbb.ni[bbb.ixmp, :,2]+bbb.ni[bbb.ixmp, :,3]+bbb.ni[bbb.ixmp,:,4])
-        C_Li_OMP_rad = n_Li/bbb.ne[bbb.ixmp, :]
-        zeff_omp_rad = bbb.zeff[bbb.ixmp,:]
 
-        output_dir = "C_Li_omp"
-        os.makedirs(output_dir, exist_ok=True)  
-        fname = os.path.join(output_dir, "CLi_prof" + "{:.1f}".format(i) + ".csv")
-        print("Saving C_Li  in file: ", fname)
-        np.savetxt(fname,C_Li_OMP_rad, delimiter=",")
+        n_Li_rad = (bbb.ni[bbb.ixmp, :, 2] +
+                    bbb.ni[bbb.ixmp, :, 3] +
+                    bbb.ni[bbb.ixmp, :, 4])
+        C_Li_OMP_rad = n_Li / bbb.ne[bbb.ixmp, :]
+        zeff_omp_rad = bbb.zeff[bbb.ixmp, :]
+        save_csv(C_Li_OMP_rad, "C_Li_omp", "CLi_prof", i)
+        save_csv(zeff_omp_rad, "Z_eff_omp", "Zeff_prof", i)
+        save_csv(bbb.prad[:, :], "Li_rad", "Li_rad", i)
+        phi_Li_source_odiv.append(np.sum(bbb.sputflxrb))
+        phi_Li_source_idiv.append(np.sum(bbb.sputflxlb))
+        phi_Li_source_pfr.append(np.sum(bbb.sputflxpf))
+        phi_Li_source_wall.append(np.sum(bbb.sputflxw))
+        Li_rad.append(np.sum(bbb.prad[:, :] * com.vol))
+        phi_Li_odiv.append(np.sum(bbb.fnix[com.nx, :, 2:5]))
+        phi_Li_idiv.append(np.sum(np.abs(bbb.fnix[0, :, 2:5])))
+        phi_Li_wall.append(np.sum(np.abs(bbb.fniy[:, com.ny, 2:5])))
+        pump_Li_odiv.append(np.sum((1 - bbb.recycp[1]) * bbb.fnix[com.nx, :, 2:5]))
+        pump_Li_idiv.append(np.sum((1 - bbb.recycp[1]) * bbb.fnix[0, :, 2:5]))
+        pump_Li_wall.append(np.sum((1 - bbb.recycw[1]) * bbb.fniy[:, com.ny, 2:5]))
+        Li_ionization.append(np.sum(np.abs(bbb.psor[:, :, 2:5])))
 
-        output_dir = "Z_eff_omp"
-        os.makedirs(output_dir, exist_ok=True)  
-        fname = os.path.join(output_dir, "Zeff_prof" + "{:.1f}".format(i) + ".csv")
-        print("Saving Zeff in file: ", fname)
-        np.savetxt(fname,zeff_omp_rad , delimiter=",")
-
-
-        Li_rad2D = bbb.prad[:, :]
-
-        output_dir = "Li_rad"
-        os.makedirs(output_dir, exist_ok=True)  
-        fname = os.path.join(output_dir, "Li_rad" + "{:.1f}".format(i) + ".csv")
-        print("Saving Zeff in file: ", fname)
-        np.savetxt(fname,Li_rad2D , delimiter=",")
-        
-        
-        Li_source_Odiv = np.sum(bbb.sputflxrb)
-        Li_source_idiv = np.sum(bbb.sputflxlb)
-        Li_source_pfr = np.sum(bbb.sputflxpf)
-        Li_source_Owall = np.sum(bbb.sputflxw)
-        Li_rad_val = np.sum(bbb.prad[:, :] * com.vol)
-        Phi_D_ion_odiv = np.sum(bbb.fnix[com.nx, :, 0])
-        D_neutral = np.sum(bbb.fnix[com.nx, :, 1]) 
-        Li_ion_Odiv = np.sum(bbb.fnix[com.nx, :, 2:5])
-        Li_ion_Idiv = np.sum(np.abs(bbb.fnix[0,:,2:5]))
-        Li_ion_Wall = np.sum(np.abs(bbb.fniy[:,com.ny,2:5]))
-        Li_pump_Odiv = np.sum((1-bbb.recycp[1])*bbb.fnix[com.nx,:,2:5])
-        Li_pump_Idiv = np.sum((1-bbb.recycp[1])*bbb.fnix[0,:,2:5])
-        Li_pump_wall = np.sum((1-bbb.recycw[1])*bbb.fniy[:,com.ny,2:5])
-
-        Li_ionization_val = np.sum(np.sum(np.abs(bbb.psor[:,:,2:5])))
-        phi_Li_source_odiv.append(Li_source_Odiv)
-        phi_Li_source_idiv.append(Li_source_idiv)
-        phi_Li_source_pfr.append(Li_source_pfr)
-        phi_Li_source_wall.append(Li_source_Owall)
-        Li_rad.append(Li_rad_val)
-        phi_Li_odiv.append(Li_ion_Odiv)
-        phi_Li_wall.append(Li_ion_Wall)
-        phi_Li_idiv.append(Li_ion_Idiv)
-        pump_Li_odiv.append(Li_pump_Odiv)
-        pump_Li_wall.append(Li_pump_wall)
-        pump_Li_idiv.append(Li_pump_Idiv)
-        Li_ionization.append(Li_ionization_val)
-                    
-        
-    
-   
+        # --- Save surface heatflux components and plots for both targets ---
+        for target in ['outer', 'inner']:
+            save_surface_heatflux_components(ana, i, target)
+            save_png(
+      		  lambda: utplt.plot_surface_heatflux_components(target=target),
+      		  "q_surf_output_png",
+       		  f"q_surf_{target}",
+       				 i,
+      			  save=True)
+   				 
     it.append(i)
-    counter = i
     i += 1
     print("Iteration:", i)
-    
+
+# --- Final Save ---
 
 qmax = np.array(qmax)
 tsurf = np.array(Tsurf_max)
 Phi_Li = np.array(phi_Li)
-
-savefile="final_iteration"+".hdf5"
-hdf5_save(savefile)
-
-# Save results to files for plotting 
+savefile = "final_iteration.hdf5"
+save_hdf5(savefile)
 np.savetxt("qmax.csv", qmax, delimiter=",")
 np.savetxt("Tsurf.csv", tsurf, delimiter=",")
 np.savetxt("It.csv", it, delimiter=",")
-np.savetxt("Phi_Li.csv", Phi_Li, delimiter = ",")
-
-print('The factor is :', bbb.fphysyrb[0,0])
-
+np.savetxt("Phi_Li.csv", Phi_Li, delimiter=",")
 
 data = {
     "phi_Li_source_odiv": phi_Li_source_odiv,
@@ -449,60 +438,16 @@ data = {
     "pump_Li_wall": pump_Li_wall,
     "pump_Li_idiv": pump_Li_idiv,
     "Li_ionization": Li_ionization,
-    "Te_max_odiv"  : Te_max_odiv,
-    "ne_max_odiv"  : ne_max_odiv,
-    "zeff_omp_sep" : zeff_OMP_sep,
-    "C_Li_omp_sep" : C_Li_omp_sep,
-     "ni_omp_sep" :  ni_omp_sep,
-     "Te_omp_sep" :  Te_omp_sep,
-     "ne_omp_sep" :  ne_omp_sep,
-     "C_Li_sep_all" :  C_Li_all_sep_avg,
+    "Te_max_odiv": Te_max_odiv,
+    "ne_max_odiv": ne_max_odiv,
+    "zeff_omp_sep": zeff_OMP_sep,
+    "C_Li_omp_sep": C_Li_omp_sep,
+    "ni_omp_sep": ni_omp_sep,
+    "Te_omp_sep": Te_omp_sep,
+    "ne_omp_sep": ne_omp_sep,
+    "C_Li_sep_all": C_Li_all_sep_avg,
 }
-
-
 df = pd.DataFrame(data)
-csv_filename = "Li_all.csv"  
+csv_filename = "Li_all.csv"
 df.to_csv(csv_filename, index=False)
 print(f"Data successfully saved to {csv_filename}")
-
-
-plt.figure()
-plt.plot(qmax/1e6, tsurf, '--r', marker='*', markersize=14)
-plt.xlabel('q$_{\perp, max}^{odiv}$ (MW/m$^2$)', fontsize=20)
-plt.ylabel('T$_{surf}^{max}$ ($^\circ$C)', fontsize=20)
-plt.title('qmax vs Tmax per iteration')
-#plt.legend()
-plt.xticks(fontsize=14) 
-plt.yticks(fontsize=14) 
-plt.grid()
-#plt.ylim([0,2])
-#plt.xlim([0 ,6])
-plt.tight_layout()
-plt.savefig('q_max_Temp_it.png', dpi=300)
-plt.show()
-
-
-
-
-#num_cases = counter
-#q_data = []
-#for i in range(1, num_cases + 1):
-#    fname = f"q_perpit_{i}.csv"
-#    print(f"Loading data from file: {fname}")
-#    q_data_array = np.loadtxt(fname)
-#    q_data.append(q_data_array)
-
-plt.figure(figsize=(12, 8))
-
-for i, data in enumerate(q_data):
-    plt.plot(com.yyrb, q_data, label=f'Case {i + 1}')
-
-plt.xlabel('com.yyrb')
-plt.ylabel('q Value')
-plt.title('Data for Each Case vs. com.rrtb')
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.show()
-
-
