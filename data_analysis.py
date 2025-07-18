@@ -87,10 +87,10 @@ for i in range(nx):
         bbb.pradpltwl()
 
         # --- Standard power/particle balance ---
-        imp_target_Odiv = np.sum(bbb.pwr_pltz[1:-1, 1]) / 1e6
-        imp_target_Idiv = np.sum(bbb.pwr_pltz[1:-1, 0]) / 1e6
-        imp_wall = np.sum(bbb.pwr_wallz) / 1e6
-        imp_PFR = np.sum(bbb.pwr_pfwallz) / 1e6
+        imp_target_Odiv = np.sum(bbb.pwr_pltz[1:-1, 1]*com.sxnp[com.nx,1:-1]) / 1e6
+        imp_target_Idiv = np.sum(bbb.pwr_pltz[1:-1, 0]*com.sxnp[0,1:-1]) / 1e6
+        imp_wall = np.sum(bbb.pwr_wallz*com.sy[:,com.ny]) / 1e6
+        imp_PFR = 0#np.sum(bbb.pwr_pfwallz) / 1e6
 
         Kinetic = 0.5 * bbb.mi[0] * bbb.up[:, :, 0]**2 * bbb.fnix[:, :, 0]
         pradhyd = np.sum(bbb.pradhyd * com.vol)
@@ -144,7 +144,7 @@ for i in range(nx):
         ) / 1e21  # 1e21 particles/s
 
         # Ionization and recombination
-        Li_ionization = np.sum(np.abs(bbb.psor[:, :, 2])) / 1e21  # Li 1+ ionization
+        Li_ionization = np.sum(np.abs(bbb.psor[:, :, 1])) / 1e21  # Li 1+ ionization
         Li_recombination = np.sum(np.abs(bbb.psorrg[:, :, 1])) / 1e21  # Li 1+ recombination
 
         # Neutral strike at O-div
